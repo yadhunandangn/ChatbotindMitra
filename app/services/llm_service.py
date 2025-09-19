@@ -1,67 +1,80 @@
+import os
+from pathlib import Path
 from langchain_groq import ChatGroq
 from langchain.prompts import ChatPromptTemplate
 from app.services.intent_service import classify_intent
-from app.services.memory import get_history
-import os
-from pathlib import Path
-from dotenv import load_dotenv
 
-# Load environment
-env_path = Path(__file__).resolve().parents[2] / ".env"
-load_dotenv(dotenv_path=env_path)
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# =========================
+# Load environment variables (once)
+# =========================
+ENV = os.getenv("ENV", "development")
 
+if ENV == "development":
+    from dotenv import load_dotenv
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    load_dotenv(dotenv_path=env_path)
+
+# Fetch GROQ API key
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    raise ValueError(
+        "GROQ_API_KEY is missing! "
+        "Set it in .env for local dev or in Render environment variables."
+    )
+
+# =========================
 # Initialize LLM
+# =========================
 llm = ChatGroq(
     api_key=GROQ_API_KEY,
     model="llama-3.3-70b-versatile",
-    temperature=0.3,  # slightly warmer for friendly conversation
+    temperature=0.3,
 )
 
-# Prompt template for role-aware, context-aware responses
+# =========================
+# Chat Prompt Template
+# =========================
 chat_prompt = ChatPromptTemplate.from_messages([
-    ("system",
-     "You are MindMitra, a mental health support AI platform assistant.\n"
-     "You help users (patients), doctors, and admins manage appointments and doctor profiles.\n"
-     "Tone and style based on role:\n"
-     "- Patients → empathetic, friendly, concise, acknowledge past messages, ask only for missing info.\n"
-     "- Doctors/Admins → professional, concise, focus on actionable info.\n"
-     "Always provide actionable guidance, follow the detected intent and extracted details strictly."
+    (
+        "system",
+        "You are MindMitra, a mental health support AI platform assistant. "
+        "Provide empathetic, informative responses. Tone and style should match the user's role."
     ),
-    ("human",
-     "Role: {role}\nIntent: {intent}\nMessage: {message}\nConversation History:\n{history}\n\n"
-     "Reply in the same conversational style and maintain continuity.")
+    (
+        "human",
+        "Role: {role}\nIntent: {intent}\nMessage: {message}\nConversation History:\n{history}\n\n"
+        "Reply in the same conversational style and maintain continuity."
+    )
 ])
 
+# =========================
+# Analyze Message Function
+# =========================
 def analyze_message(message: str, role: str = "patient", history: list[dict] = None) -> dict:
     """
-    Combines intent classification and actionable LLM reply.
-    Maintains conversation continuity by including past messages.
-    Returns a dict with 'intent', extracted details, and 'reply'.
+    Classify the intent of the message, and generate a reply using ChatGroq LLM.
     """
-    # 1️⃣ Detect intent & extract details
+    # 1️⃣ Classify intent using your intent service
     intent_result = classify_intent(message, role)
 
-    # 2️⃣ Format conversation history for LLM
-    history_str = ""
-    if history:
-        for msg in history[-10:]:  # last 10 messages for context
-            speaker = "User" if msg["role"] == "user" else "Bot"
-            # Add slight formatting for readability
-            history_str += f"{speaker}: {msg['message']}\n"
+    # 2️⃣ Prepare conversation history (last 10 messages)
+    history_str = "".join([
+        f"{'User' if msg['role']=='user' else 'Bot'}: {msg['message']}\n"
+        for msg in (history or [])[-10:]
+    ])
 
-    # 3️⃣ Generate actionable, role-aware reply
-    chain = chat_prompt | llm
-    response = chain.invoke({
-        "message": message,
-        "role": role,
-        "intent": intent_result["intent"],
-        "history": history_str
-    })
+    # 3️⃣ Generate response from LLM
+    try:
+        chain = chat_prompt | llm
+        response = chain.invoke({
+            "message": message,
+            "role": role,
+            "intent": intent_result["intent"],
+            "history": history_str
+        })
+        intent_result["reply"] = response.content.strip()
+    except Exception as e:
+        print("LLM Error:", e)
+        intent_result["reply"] = "⚠️ Sorry, I couldn't process your request right now."
 
-    # 4️⃣ Clean up reply
-    reply_text = response.content.strip()
-
-    # 5️⃣ Add reply to intent result
-    intent_result["reply"] = reply_text
     return intent_result
